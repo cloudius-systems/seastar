@@ -186,7 +186,6 @@ public:
         // If less is released then the reclaimer may be invoked again.
         size_t bytes_to_reclaim;
     };
-    using reclaim_fn = std::function<reclaiming_result ()>;
 private:
     std::function<reclaiming_result (request)> _reclaim;
     reclaimer_scope _scope;
@@ -197,7 +196,7 @@ public:
     reclaimer(std::function<reclaiming_result (request)> reclaim, reclaimer_scope scope = reclaimer_scope::async);
     ~reclaimer();
     reclaiming_result do_reclaim(size_t bytes_to_reclaim) { return _reclaim(request{bytes_to_reclaim}); }
-    reclaimer_scope scope() const { return _scope; }
+    reclaimer_scope scope() const noexcept { return _scope; }
 };
 
 extern std::pmr::polymorphic_allocator<char>* malloc_allocator;
@@ -223,7 +222,7 @@ void set_reclaim_hook(
 class statistics;
 
 /// Capture a snapshot of memory allocation statistics for this lcore.
-statistics stats();
+statistics stats() noexcept;
 
 /// Memory allocation statistics.
 class statistics {
@@ -241,38 +240,38 @@ class statistics {
 private:
     statistics(uint64_t mallocs, uint64_t frees, uint64_t cross_cpu_frees,
             uint64_t total_memory, uint64_t free_memory, uint64_t reclaims, uint64_t large_allocs,
-            uint64_t foreign_mallocs, uint64_t foreign_frees, uint64_t foreign_cross_frees)
+            uint64_t foreign_mallocs, uint64_t foreign_frees, uint64_t foreign_cross_frees) noexcept
         : _mallocs(mallocs), _frees(frees), _cross_cpu_frees(cross_cpu_frees)
         , _total_memory(total_memory), _free_memory(free_memory), _reclaims(reclaims), _large_allocs(large_allocs)
         , _foreign_mallocs(foreign_mallocs), _foreign_frees(foreign_frees)
         , _foreign_cross_frees(foreign_cross_frees) {}
 public:
     /// Total number of memory allocations calls since the system was started.
-    uint64_t mallocs() const { return _mallocs; }
+    uint64_t mallocs() const noexcept { return _mallocs; }
     /// Total number of memory deallocations calls since the system was started.
-    uint64_t frees() const { return _frees; }
+    uint64_t frees() const noexcept { return _frees; }
     /// Total number of memory deallocations that occured on a different lcore
     /// than the one on which they were allocated.
-    uint64_t cross_cpu_frees() const { return _cross_cpu_frees; }
+    uint64_t cross_cpu_frees() const noexcept { return _cross_cpu_frees; }
     /// Total number of objects which were allocated but not freed.
-    size_t live_objects() const { return mallocs() - frees(); }
+    size_t live_objects() const noexcept { return mallocs() - frees(); }
     /// Total free memory (in bytes)
-    size_t free_memory() const { return _free_memory; }
+    size_t free_memory() const noexcept { return _free_memory; }
     /// Total allocated memory (in bytes)
-    size_t allocated_memory() const { return _total_memory - _free_memory; }
+    size_t allocated_memory() const noexcept { return _total_memory - _free_memory; }
     /// Total memory (in bytes)
-    size_t total_memory() const { return _total_memory; }
+    size_t total_memory() const noexcept { return _total_memory; }
     /// Number of reclaims performed due to low memory
-    uint64_t reclaims() const { return _reclaims; }
+    uint64_t reclaims() const noexcept { return _reclaims; }
     /// Number of allocations which violated the large allocation threshold
-    uint64_t large_allocations() const { return _large_allocs; }
+    uint64_t large_allocations() const noexcept { return _large_allocs; }
     /// Number of foreign allocations
-    uint64_t foreign_mallocs() const { return _foreign_mallocs; }
+    uint64_t foreign_mallocs() const noexcept { return _foreign_mallocs; }
     /// Number of foreign frees
-    uint64_t foreign_frees() const { return _foreign_frees; }
+    uint64_t foreign_frees() const noexcept { return _foreign_frees; }
     /// Number of foreign frees on reactor threads
-    uint64_t foreign_cross_frees() const { return _foreign_cross_frees; }
-    friend statistics stats();
+    uint64_t foreign_cross_frees() const noexcept { return _foreign_cross_frees; }
+    friend statistics stats() noexcept;
 };
 
 struct memory_layout {
@@ -282,16 +281,17 @@ struct memory_layout {
 
 // Discover virtual address range used by the allocator on current shard.
 // Supported only when seastar allocator is enabled.
-memory::memory_layout get_memory_layout();
+memory::memory_layout get_memory_layout() noexcept;
 
 /// Returns the size of free memory in bytes.
-size_t free_memory();
+size_t free_memory() noexcept;
 
 /// Returns the value of free memory low water mark in bytes.
 /// When free memory is below this value, reclaimers are invoked until it goes above again.
-size_t min_free_memory();
+size_t min_free_memory() noexcept;
 
 /// Sets the value of free memory low water mark in memory::page_size units.
+/// Throws runtime_error if number of pages is tool large.
 void set_min_free_pages(size_t pages);
 
 /// Enable the large allocation warning threshold.
@@ -299,19 +299,19 @@ void set_min_free_pages(size_t pages);
 /// Warn when allocation above a given threshold are performed.
 ///
 /// \param threshold size (in bytes) above which an allocation will be logged
-void set_large_allocation_warning_threshold(size_t threshold);
+void set_large_allocation_warning_threshold(size_t threshold) noexcept;
 
 /// Gets the current large allocation warning threshold.
-size_t get_large_allocation_warning_threshold();
+size_t get_large_allocation_warning_threshold() noexcept;
 
 /// Disable large allocation warnings.
-void disable_large_allocation_warning();
+void disable_large_allocation_warning() noexcept;
 
 /// Set a different large allocation warning threshold for a scope.
 class scoped_large_allocation_warning_threshold {
     size_t _old_threshold;
 public:
-    explicit scoped_large_allocation_warning_threshold(size_t threshold)
+    explicit scoped_large_allocation_warning_threshold(size_t threshold) noexcept
             : _old_threshold(get_large_allocation_warning_threshold()) {
         set_large_allocation_warning_threshold(threshold);
     }
@@ -330,7 +330,7 @@ public:
 class scoped_large_allocation_warning_disable {
     size_t _old_threshold;
 public:
-    scoped_large_allocation_warning_disable()
+    scoped_large_allocation_warning_disable() noexcept
             : _old_threshold(get_large_allocation_warning_threshold()) {
         disable_large_allocation_warning();
     }

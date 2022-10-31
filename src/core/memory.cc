@@ -228,11 +228,11 @@ using stats_atomic_array = std::array<std::atomic_uint64_t, static_cast<std::siz
 static thread_local SEASTAR_CONSTINIT stats_array stats{};
 std::array<stats_atomic_array, max_cpus> alien_stats{};
 
-static void increment_local(types stat_type, uint64_t size = 1) {
+static void increment_local(types stat_type, uint64_t size = 1) noexcept {
     stats[static_cast<std::size_t>(stat_type)] += size;
 }
 
-static void increment(types stat_type, uint64_t size=1)
+static void increment(types stat_type, uint64_t size=1) noexcept
 {
     // fast path, reactor threads takes thread local statistics
     if (is_reactor_thread) {
@@ -244,7 +244,7 @@ static void increment(types stat_type, uint64_t size=1)
     }
 }
 
-static uint64_t get(types stat_type)
+static uint64_t get(types stat_type) noexcept
 {
     auto i = static_cast<std::size_t>(stat_type);
     // fast path, reactor threads takes thread local statistics
@@ -565,7 +565,7 @@ struct cpu_pages {
     void replace_memory_backing(allocate_system_memory_fn alloc_sys_mem);
     void check_large_allocation(size_t size);
     void warn_large_allocation(size_t size);
-    memory::memory_layout memory_layout();
+    memory::memory_layout memory_layout() noexcept;
     ~cpu_pages();
 };
 
@@ -573,7 +573,7 @@ static thread_local cpu_pages cpu_mem;
 std::atomic<unsigned> cpu_pages::cpu_id_gen;
 cpu_pages* cpu_pages::all_cpus[max_cpus];
 
-static cpu_pages& get_cpu_mem();
+static cpu_pages& get_cpu_mem() noexcept;
 
 #ifdef SEASTAR_HEAPPROF
 
@@ -1169,7 +1169,7 @@ void cpu_pages::schedule_reclaim() {
     });
 }
 
-memory::memory_layout cpu_pages::memory_layout() {
+memory::memory_layout cpu_pages::memory_layout() noexcept {
     assert(is_initialized());
     return {
         reinterpret_cast<uintptr_t>(memory),
@@ -1367,7 +1367,7 @@ static void init_cpu_mem() {
 }
 
 [[gnu::always_inline]]
-static inline cpu_pages& get_cpu_mem()
+static inline cpu_pages& get_cpu_mem() noexcept
 {
     // cpu_pages has a non-trivial constructor which means that the compiler
     // must make sure the instance local to the current thread has been
@@ -1499,15 +1499,15 @@ reclaimer::~reclaimer() {
     r.erase(std::find(r.begin(), r.end(), this));
 }
 
-void set_large_allocation_warning_threshold(size_t threshold) {
+void set_large_allocation_warning_threshold(size_t threshold) noexcept {
     get_cpu_mem().large_allocation_warning_threshold = threshold;
 }
 
-size_t get_large_allocation_warning_threshold() {
+size_t get_large_allocation_warning_threshold() noexcept {
     return get_cpu_mem().large_allocation_warning_threshold;
 }
 
-void disable_large_allocation_warning() {
+void disable_large_allocation_warning() noexcept {
     get_cpu_mem().large_allocation_warning_threshold = std::numeric_limits<size_t>::max();
 }
 
@@ -1558,13 +1558,13 @@ void configure(std::vector<resource::memory> m, bool mbind,
     }
 }
 
-statistics stats() {
+statistics stats() noexcept {
     return statistics{alloc_stats::get(alloc_stats::types::allocs), alloc_stats::get(alloc_stats::types::frees), alloc_stats::get(alloc_stats::types::cross_cpu_frees),
         cpu_mem.nr_pages * page_size, cpu_mem.nr_free_pages * page_size, alloc_stats::get(alloc_stats::types::reclaims), alloc_stats::get(alloc_stats::types::large_allocs),
         alloc_stats::get(alloc_stats::types::foreign_mallocs), alloc_stats::get(alloc_stats::types::foreign_frees), alloc_stats::get(alloc_stats::types::foreign_cross_frees)};
 }
 
-size_t free_memory() {
+size_t free_memory() noexcept {
     return get_cpu_mem().nr_free_pages * page_size;
 }
 
@@ -1572,11 +1572,11 @@ bool drain_cross_cpu_freelist() {
     return get_cpu_mem().drain_cross_cpu_freelist();
 }
 
-memory_layout get_memory_layout() {
+memory_layout get_memory_layout() noexcept {
     return get_cpu_mem().memory_layout();
 }
 
-size_t min_free_memory() {
+size_t min_free_memory() noexcept {
     return get_cpu_mem().min_free_pages * page_size;
 }
 
