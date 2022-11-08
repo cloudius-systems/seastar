@@ -21,8 +21,10 @@
 
 #pragma once
 
+#include <exception>
 #include <seastar/core/future.hh>
 #include <seastar/core/posix.hh>
+#include <stdexcept>
 #include <vector>
 #include <tuple>
 #include <seastar/core/internal/io_desc.hh>
@@ -47,6 +49,15 @@ namespace net {
 class packet;
 
 }
+
+/// Exception thrown when \ref pollable_fd object has been closed during active 
+/// waiting promise on \ref pollable_fd::readable or pollable_fd::writeable.
+class pollable_fd_aborted : public std::exception {
+public:
+    virtual const char* what() const noexcept override {
+        return "pollable_fd aborted";
+    }
+};
 
 class pollable_fd_state;
 
