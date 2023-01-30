@@ -21,6 +21,7 @@
 
 #pragma once
 
+#include "abort_source.hh"
 #include <boost/intrusive/list.hpp>
 
 #include <seastar/core/timer.hh>
@@ -28,6 +29,7 @@
 #   include <seastar/core/coroutine.hh>
 #endif
 #include <seastar/core/loop.hh>
+#include <seastar/core/abort_source.hh>
 
 namespace seastar {
 
@@ -76,6 +78,7 @@ private:
     };
 
     struct promise_waiter : public waiter, public promise<> {
+        optimized_optional<abort_source::subscription> sub;
         void signal() noexcept override {
             set_value();
             // note: we self-delete in either case we are woken
@@ -88,6 +91,18 @@ private:
             // see comment above
             delete this;
         }
+        // Subscribe to the abort_source.
+        // If abort was already requested, calls set_exception
+        // and the latter destroys the object,
+        // so subscribe should be called after get_future and add_waiter.
+        void subscribe(abort_source& as) noexcept {
+            sub = as.subscribe([this] (const std::optional<std::exception_ptr>& opt_ex) noexcept {
+                set_exception(opt_ex.value_or(std::make_exception_ptr(abort_requested_exception())));
+            });
+            if (!sub) {
+                set_exception(as.get_exception());
+            }
+        }
     };
 
 #ifdef SEASTAR_COROUTINES_ENABLED
@@ -95,6 +110,7 @@ private:
         using handle_type = std::coroutine_handle<void>;
 
         condition_variable* _cv;
+        optimized_optional<abort_source::subscription> _sub;
         handle_type _when_ready;
         std::exception_ptr _ex;
         task* _waiting_task = nullptr;
@@ -103,8 +119,19 @@ private:
             : _cv(cv)
         {}
 
+        awaiter(condition_variable* cv, abort_source& as)
+            : _cv(cv)
+        {
+            _sub = as.subscribe([this] (const std::optional<std::exception_ptr>& opt_ex) noexcept {
+                set_exception(opt_ex.value_or(std::make_exception_ptr(abort_requested_exception())));
+            });
+            if (!_sub) {
+                _ex = as.get_exception();
+            }
+        }
+
         bool await_ready() const {
-            return _cv->check_and_consume_signal();
+            return _cv->check_and_consume_signal() || _ex;
         }
         template<typename T>
         void await_suspend(std::coroutine_handle<T> h) {
@@ -170,7 +197,7 @@ private:
         bool await_ready() const {
             if (!_func()) {
                 Base::await_ready(); // clear out any signal state
-                return false;
+                return bool(Base::_ex);
             }
             return true;
         }        
@@ -219,6 +246,27 @@ public:
         return f;
     }
 
+    /// Waits until condition variable is signaled, or if aborted via an \ref abort_source,
+    /// may wake up without condition been met
+    ///
+    /// \return a future that becomes ready when \ref signal() is called
+    ///         If abort is requested, return the abort exception.
+    ///         If the condition variable was \ref broken() will return \ref broken_condition_variable
+    ///         exception.
+    future<> wait(abort_source& as) noexcept {
+        if (as.abort_requested()) {
+            return make_exception_future<>(as.get_exception());
+        }
+        if (check_and_consume_signal()) {
+            return make_ready_future();
+        }
+        auto* w = new promise_waiter;
+        auto f = w->get_future();
+        add_waiter(*w);
+        w->subscribe(as);
+        return f;
+    }
+
     /// Waits until condition variable is signaled or timeout is reached
     ///
     /// \param timeout time point at which wait will exit with a timeout
@@ -233,12 +281,12 @@ public:
         }
         struct timeout_waiter : public promise_waiter, public timer<Clock> {};
 
-        auto w = std::make_unique<timeout_waiter>();
+        auto w = new timeout_waiter;
         auto f = w->get_future();
 
-        w->set_callback(std::bind(&waiter::timeout, w.get()));
+        w->set_callback(std::bind(&waiter::timeout, w));
         w->arm(timeout);
-        add_waiter(*w.release());
+        add_waiter(*w);
         return f;
     }
 
@@ -266,6 +314,24 @@ public:
     future<> wait(Pred&& pred) noexcept {
         return do_until(std::forward<Pred>(pred), [this] {
             return wait();
+        });
+    }
+
+    /// Waits until abort is requested or condition variable is notified and pred() == true,
+    /// otherwise wait again.
+    ///
+    /// \param pred predicate that checks that awaited condition is true
+    ///
+    /// \return a future that becomes ready when \ref signal() is called
+    ///         If the condition variable was \ref broken(), may contain an exception.
+    template<typename Pred>
+    SEASTAR_CONCEPT( requires seastar::InvokeReturns<Pred, bool> )
+    future<> wait(abort_source& as, Pred&& pred) noexcept {
+        if (as.abort_requested()) {
+            return make_exception_future<>(as.get_exception());
+        }
+        return do_until(std::forward<Pred>(pred), [this, &as] {
+            return wait(as);
         });
     }
 
@@ -313,6 +379,18 @@ public:
     }
 
     /// Coroutine/co_await only waiter.
+    /// Waits until condition variable is signaled or abort was requested,
+    /// may wake up without condition been met
+    ///
+    /// \return a future that becomes ready when \ref signal() is called
+    ///         If abort was requested, return the \ref abort_source exception.
+    ///         If the condition variable was \ref broken() will return \ref broken_condition_variable
+    ///         exception.
+    awaiter when(abort_source& as) noexcept {
+        return awaiter{this, as};
+    }
+
+    /// Coroutine/co_await only waiter.
     /// Waits until condition variable is signaled or timeout is reached
     ///
     /// \param timeout time point at which wait will exit with a timeout
@@ -349,7 +427,21 @@ public:
     template<typename Pred>
     SEASTAR_CONCEPT( requires seastar::InvokeReturns<Pred, bool> )
     auto when(Pred&& pred) noexcept {
-        return predicate_awaiter<Pred, awaiter>{std::forward<Pred>(pred), when()};
+        return predicate_awaiter<Pred, awaiter>{std::forward<Pred>(pred), this};
+    }
+
+    /// Coroutine/co_await only waiter.
+    /// Waits until condition variable is notified and pred() == true, otherwise
+    /// wait again.
+    ///
+    /// \param pred predicate that checks that awaited condition is true
+    ///
+    /// \return a future that becomes ready when \ref signal() is called
+    ///         If the condition variable was \ref broken(), may contain an exception.
+    template<typename Pred>
+    SEASTAR_CONCEPT( requires seastar::InvokeReturns<Pred, bool> )
+    auto when(abort_source& as, Pred&& pred) noexcept {
+        return predicate_awaiter<Pred, awaiter>{std::forward<Pred>(pred), this, as};
     }
 
     /// Coroutine/co_await only waiter.
@@ -365,7 +457,7 @@ public:
     template<typename Clock = typename timer<>::clock, typename Duration = typename Clock::duration, typename Pred>
     SEASTAR_CONCEPT( requires seastar::InvokeReturns<Pred, bool> )
     auto when(std::chrono::time_point<Clock, Duration> timeout, Pred&& pred) noexcept {
-        return predicate_awaiter<Pred, timeout_awaiter<Clock, Duration>>{std::forward<Pred>(pred), when(timeout)};
+        return predicate_awaiter<Pred, timeout_awaiter<Clock, Duration>>{std::forward<Pred>(pred), this, timeout};
     }
 
     /// Coroutine/co_await only waiter.

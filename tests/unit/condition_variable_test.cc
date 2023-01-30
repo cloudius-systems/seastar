@@ -20,6 +20,7 @@
  * Copyright (C) 2015 Cloudius Systems, Ltd.
  */
 
+#include <boost/test/tools/old/interface.hpp>
 #include <seastar/core/thread.hh>
 #include <seastar/core/do_with.hh>
 #include <seastar/testing/test_case.hh>
@@ -222,6 +223,64 @@ SEASTAR_THREAD_TEST_CASE(test_condition_variable_has_waiter) {
     BOOST_REQUIRE_EQUAL(cv.has_waiters(), false);
 }
 
+SEASTAR_THREAD_TEST_CASE(test_condition_variable_abort) {
+    condition_variable cv;
+    abort_source as;
+
+    std::vector<future<>> waiters;
+    waiters.emplace_back(cv.wait());
+    waiters.emplace_back(cv.wait(as));
+    waiters.emplace_back(cv.wait());
+
+    BOOST_REQUIRE_EQUAL(std::count_if(waiters.begin(), waiters.end(), std::mem_fn(&future<>::available)), 0u);
+
+    as.request_abort();
+
+    BOOST_REQUIRE_EQUAL(waiters[0].available(), false);
+    BOOST_REQUIRE_EQUAL(waiters[1].failed(), true);
+    BOOST_REQUIRE_EQUAL(waiters[2].available(), false);
+
+    cv.broadcast();
+
+    BOOST_REQUIRE_NO_THROW(waiters[0].get());
+    BOOST_REQUIRE_THROW(waiters[1].get(), abort_requested_exception);
+    BOOST_REQUIRE_NO_THROW(waiters[2].get());
+
+    condition_variable cv2;
+    BOOST_REQUIRE_THROW(cv2.wait(as).get(), abort_requested_exception);
+}
+
+SEASTAR_THREAD_TEST_CASE(test_condition_variable_timeout_abort) {
+    condition_variable cv;
+    auto aoe = abort_on_expiry<lowres_clock>(lowres_clock::now() + 1s);
+    abort_source& as = aoe.abort_source();
+
+    auto f = cv.wait(as);
+    BOOST_REQUIRE_EQUAL(f.available(), false);
+
+    as.request_abort();
+    BOOST_REQUIRE_THROW(f.get(), abort_requested_exception);
+
+    condition_variable cv2;
+    BOOST_REQUIRE_THROW(cv2.wait(as).get(), abort_requested_exception);
+}
+
+SEASTAR_THREAD_TEST_CASE(test_condition_variable_pred_wait_abort) {
+    condition_variable cv;
+    abort_source as;
+
+    bool ready = false;
+
+    auto f = cv.wait(as, [&] { return ready; });
+    BOOST_REQUIRE_EQUAL(f.available(), false);
+
+    as.request_abort();
+    BOOST_REQUIRE_THROW(f.get(), abort_requested_exception);
+
+    condition_variable cv2;
+    BOOST_REQUIRE_THROW(cv2.wait(as, [&] { return ready; }).get(), abort_requested_exception);
+}
+
 #ifdef SEASTAR_COROUTINES_ENABLED
 
 SEASTAR_TEST_CASE(test_condition_variable_signal_consume_coroutine) {
@@ -364,6 +423,69 @@ SEASTAR_TEST_CASE(test_condition_variable_when_timeout) {
     // and cause the wait to time out, even though it did not. -> assert
 
     co_await std::move(f);
+}
+
+SEASTAR_TEST_CASE(test_condition_variable_abort_when) {
+    condition_variable cv;
+    abort_source as;
+
+    timer<> default_timer;
+    default_timer.set_callback([&] {
+        BOOST_TEST_MESSAGE("default timer expired");
+        cv.broken();
+    });
+    default_timer.arm(100ms);
+
+    timer<> abort_timer;
+    abort_timer.set_callback([&] { as.request_abort(); });
+    abort_timer.arm(10ms);
+
+    BOOST_REQUIRE_THROW(co_await cv.when(as), abort_requested_exception);
+
+    condition_variable cv2;
+    default_timer.cancel();
+    default_timer.set_callback([&] {
+        BOOST_TEST_MESSAGE("default timer expired");
+        cv2.broken();
+    });
+    default_timer.arm(100ms);
+
+    BOOST_REQUIRE_THROW(co_await cv2.when(as), abort_requested_exception);
+}
+
+SEASTAR_TEST_CASE(test_condition_variable_abort_when_timeout) {
+    condition_variable cv;
+    auto aoe = abort_on_expiry<lowres_clock>(lowres_clock::now() + 1s);
+    abort_source& as = aoe.abort_source();
+
+    auto tmr = timer<lowres_clock>([&as] {
+        as.request_abort_ex(std::runtime_error("expired"));
+    });
+    tmr.arm(10ms);
+
+    BOOST_REQUIRE_THROW(co_await cv.when(as), std::runtime_error);
+
+    condition_variable cv2;
+    BOOST_REQUIRE_THROW(co_await cv2.when(as), std::runtime_error);
+}
+
+SEASTAR_TEST_CASE(test_condition_variable_abort_when_pred) {
+    condition_variable cv;
+    abort_source as;
+
+    timer<> default_timer;
+    default_timer.set_callback([&] { cv.broken(); });
+    default_timer.arm(100ms);
+
+    timer<> abort_timer;
+    abort_timer.set_callback([&] { as.request_abort(); });
+    abort_timer.arm(10ms);
+
+    bool ready = false;
+    BOOST_REQUIRE_THROW(co_await cv.when(as, [&] { return ready; }), abort_requested_exception);
+
+    condition_variable cv2;
+    BOOST_REQUIRE_THROW(co_await cv2.when(as, [&] { return ready; }), abort_requested_exception);
 }
 
 #endif
