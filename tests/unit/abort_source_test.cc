@@ -19,12 +19,15 @@
  * Copyright (C) 2017 ScyllaDB
  */
 
+#include "seastar/core/abort_source.hh"
 #include <seastar/testing/test_case.hh>
 #include <seastar/testing/thread_test_case.hh>
 
 #include <seastar/core/gate.hh>
 #include <seastar/core/sleep.hh>
 #include <seastar/core/do_with.hh>
+#include <seastar/core/manual_clock.hh>
+#include <seastar/core/abort_on_expiry.hh>
 
 using namespace seastar;
 using namespace std::chrono_literals;
@@ -173,4 +176,37 @@ SEASTAR_THREAD_TEST_CASE(test_destroy_with_moved_subscriptions) {
     sub4 = std::move(sub3);
     as.reset();
     BOOST_REQUIRE_EQUAL(aborted, 0);
+}
+
+SEASTAR_THREAD_TEST_CASE(test_abort_on_expiry) {
+    auto aoe = abort_on_expiry<manual_clock>(manual_clock::now() + 1ms);
+    BOOST_REQUIRE(!aoe.abort_source().abort_requested());
+    manual_clock::advance(2ms);
+    BOOST_REQUIRE_THROW(aoe.abort_source().check(), abort_requested_exception);
+}
+
+SEASTAR_THREAD_TEST_CASE(test_abort_on_expiry_chaining_timeout) {
+    abort_source as;
+    auto aoe = abort_on_expiry<manual_clock>(manual_clock::now() + 1ms, as);
+    BOOST_REQUIRE(!aoe.abort_source().abort_requested());
+    manual_clock::advance(2ms);
+    BOOST_REQUIRE_THROW(aoe.abort_source().check(), sleep_aborted);
+}
+
+SEASTAR_THREAD_TEST_CASE(test_abort_on_expiry_chaining_external_abort) {
+    abort_source as;
+    auto aoe = abort_on_expiry<manual_clock>(manual_clock::now() + 1ms, as);
+    BOOST_REQUIRE(!aoe.abort_source().abort_requested());
+    as.request_abort();
+    BOOST_REQUIRE_THROW(aoe.abort_source().check(), abort_requested_exception);
+    manual_clock::advance(2ms);
+    BOOST_REQUIRE_THROW(aoe.abort_source().check(), abort_requested_exception);
+}
+
+SEASTAR_THREAD_TEST_CASE(test_abort_on_expiry_chain_already_aborted) {
+    abort_source as;
+    as.request_abort_ex(std::make_exception_ptr(std::runtime_error("aborted")));
+    auto aoe = abort_on_expiry<manual_clock>(manual_clock::now() + 1ms, as);
+    BOOST_REQUIRE(aoe.abort_source().abort_requested());
+    BOOST_REQUIRE_THROW(aoe.abort_source().check(), std::runtime_error);
 }
