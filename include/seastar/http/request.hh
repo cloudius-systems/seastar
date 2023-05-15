@@ -39,6 +39,8 @@
 #include <seastar/http/mime_types.hh>
 #include <seastar/core/iostream.hh>
 
+struct echo_string_handler;
+
 namespace seastar {
 
 namespace httpd { class connection; }
@@ -78,7 +80,12 @@ struct request {
     std::unordered_map<sstring, sstring, case_insensitive_hash, case_insensitive_cmp> _headers;
     std::unordered_map<sstring, sstring> query_parameters;
     httpd::parameters param;
-    sstring content; // server-side deprecated: use content_stream instead
+private:
+    friend struct ::echo_string_handler;
+    sstring _content;
+public:
+    [[deprecated("use content_stream (server-side) / write_body (client-side) instead")]]
+    sstring& content;
     /*
      * The handler should read the contents of this stream till reaching eof (i.e., the end of this request's content). Failing to do so
      * will force the server to close this connection, and the client will not be able to reuse this connection for the next request.
@@ -89,6 +96,31 @@ struct request {
     std::unordered_map<sstring, sstring> chunk_extensions;
     sstring protocol_name = "http";
     noncopyable_function<future<>(output_stream<char>&&)> body_writer; // for client
+
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+    request()
+        : content(_content)
+    {}
+
+    request(request&& o)
+        : _method(std::move(o._method))
+        , _url(std::move(o._url))
+        , _version(std::move(o._version))
+        , content_type_class(std::move(o.content_type_class))
+        , content_length(std::move(o.content_length))
+        , _headers(std::move(o._headers))
+        , query_parameters(std::move(o.query_parameters))
+        , param(std::move(o.param))
+        , _content(std::move(o._content))
+        , content(_content)
+        , content_stream(std::move(o.content_stream))
+        , trailing_headers(std::move(o.trailing_headers))
+        , chunk_extensions(std::move(o.chunk_extensions))
+        , protocol_name(std::move(o.protocol_name))
+        , body_writer(std::move(o.body_writer))
+    {}
+#pragma GCC diagnostic pop
 
     /**
      * Search for the first header of a given name

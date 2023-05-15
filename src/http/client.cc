@@ -58,8 +58,8 @@ future<> connection::write_body(request& req) {
         return req.body_writer(internal::make_http_chunked_output_stream(_write_buf)).then([this] {
             return _write_buf.write("0\r\n\r\n");
         });
-    } else if (!req.content.empty()) {
-        return _write_buf.write(req.content);
+    } else if (!req._content.empty()) {
+        return _write_buf.write(req._content);
     } else {
         return make_ready_future<>();
     }
@@ -86,7 +86,7 @@ future<> connection::send_request_head(request& req) {
         req._version = "1.1";
     }
     if (req.content_length != 0) {
-        if (!req.body_writer && req.content.empty()) {
+        if (!req.body_writer && req._content.empty()) {
             throw std::runtime_error("Request body writer not set and content is empty");
         }
         req._headers["Content-Length"] = to_sstring(req.content_length);

@@ -90,7 +90,7 @@ sstring request::parse_query_param() {
 void request::write_body(const sstring& content_type, sstring content) {
     set_content_type(content_type);
     content_length = content.size();
-    this->content = std::move(content);
+    this->_content = std::move(content);
 }
 
 void request::write_body(const sstring& content_type, noncopyable_function<future<>(output_stream<char>&&)>&& body_writer) {
@@ -111,7 +111,7 @@ void request::set_expects_continue() {
 
 future<> request::read_body() {
     return util::read_entire_stream_contiguous(*content_stream).then([this] (sstring content) mutable {
-        this->content = std::move(content);
+        this->_content = std::move(content);
     });
 }
 
