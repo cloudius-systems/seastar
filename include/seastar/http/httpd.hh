@@ -106,6 +106,9 @@ public:
     future<> write_body();
 
     output_stream<char>& out();
+private:
+    future<std::unique_ptr<http::request>>
+    set_request_content(std::unique_ptr<http::request> req, input_stream<char>* content_stream, bool streaming);
 };
 
 class http_server_tester;

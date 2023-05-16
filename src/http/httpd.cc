@@ -171,8 +171,8 @@ static input_stream<char> make_content_stream(http::request* req, input_stream<c
     }
 }
 
-static future<std::unique_ptr<http::request>>
-set_request_content(std::unique_ptr<http::request> req, input_stream<char>* content_stream, bool streaming) {
+future<std::unique_ptr<http::request>>
+connection::set_request_content(std::unique_ptr<http::request> req, input_stream<char>* content_stream, bool streaming) {
     req->content_stream = content_stream;
 
     if (streaming) {
