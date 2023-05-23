@@ -22,6 +22,7 @@
 #include <seastar/http/request.hh>
 #include <seastar/http/url.hh>
 #include <seastar/http/common.hh>
+#include <seastar/util/short_streams.hh>
 
 namespace seastar {
 namespace http {
@@ -89,7 +90,7 @@ sstring request::parse_query_param() {
 void request::write_body(const sstring& content_type, sstring content) {
     set_content_type(content_type);
     content_length = content.size();
-    this->content = std::move(content);
+    this->_content = std::move(content);
 }
 
 void request::write_body(const sstring& content_type, noncopyable_function<future<>(output_stream<char>&&)>&& body_writer) {
@@ -106,6 +107,12 @@ void request::write_body(const sstring& content_type, size_t len, noncopyable_fu
 
 void request::set_expects_continue() {
     _headers["Expect"] = "100-continue";
+}
+
+future<> request::read_body() {
+    return util::read_entire_stream_contiguous(*content_stream).then([this] (sstring content) mutable {
+        this->_content = std::move(content);
+    });
 }
 
 request request::make(sstring method, sstring host, sstring path) {
