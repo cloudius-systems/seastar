@@ -43,7 +43,7 @@ namespace seastar {
 
 class io_queue;
 namespace internal {
-const fair_group& get_fair_group(const io_queue& ioq, unsigned stream);
+const shared_throttle& io_throttle(const io_queue& ioq, unsigned stream);
 }
 
 #if SEASTAR_API_LEVEL < 7
@@ -93,11 +93,16 @@ public:
 private:
     std::vector<std::unique_ptr<priority_class_data>> _priority_classes;
     io_group_ptr _group;
-    boost::container::static_vector<fair_queue, 2> _streams;
+    struct stream {
+        fair_queue fq;
+        throttle thr;
+        stream(shared_throttle&, fair_queue::config);
+    };
+    boost::container::static_vector<stream, 2> _streams;
     internal::io_sink& _sink;
 
     friend struct ::io_queue_for_tests;
-    friend const fair_group& internal::get_fair_group(const io_queue& ioq, unsigned stream);
+    friend const shared_throttle& internal::io_throttle(const io_queue& ioq, unsigned stream);
 
     priority_class_data& find_or_create_class(internal::priority_class pc);
     future<size_t> queue_request(internal::priority_class pc, internal::io_direction_and_length dnl, internal::io_request req, io_intent* intent, iovec_keeper iovs) noexcept;
@@ -163,9 +168,9 @@ public:
     future<size_t> submit_io_write(internal::priority_class priority_class,
             size_t len, internal::io_request req, io_intent* intent, iovec_keeper iovs = {}) noexcept;
 
+    throttle::grab_result can_dispatch_request(const queued_io_request& rq) noexcept;
     void submit_request(io_desc_read_write* desc, internal::io_request req) noexcept;
     void cancel_request(queued_io_request& req) noexcept;
-    void complete_cancelled_request(queued_io_request& req) noexcept;
     void complete_request(io_desc_read_write& desc) noexcept;
 
     [[deprecated("I/O queue users should not track individual requests, but resources (weight, size) passing through the queue")]]
@@ -218,16 +223,16 @@ public:
 private:
     friend class io_queue;
     friend struct ::io_queue_for_tests;
-    friend const fair_group& internal::get_fair_group(const io_queue& ioq, unsigned stream);
+    friend const shared_throttle& internal::io_throttle(const io_queue& ioq, unsigned stream);
 
     const io_queue::config _config;
     size_t _max_request_length[2];
-    boost::container::static_vector<fair_group, 2> _fgs;
+    boost::container::static_vector<shared_throttle, 2> _throttle;
     std::vector<std::unique_ptr<priority_class_data>> _priority_classes;
     util::spinlock _lock;
     const shard_id _allocated_on;
 
-    static fair_group::config make_fair_group_config(const io_queue::config& qcfg) noexcept;
+    static shared_throttle::config make_throttle_config(const io_queue::config& qcfg) noexcept;
     priority_class_data& find_or_create_class(internal::priority_class pc);
 };
 

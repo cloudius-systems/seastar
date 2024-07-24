@@ -36,37 +36,33 @@
 using namespace seastar;
 using namespace std::chrono_literals;
 
-struct request {
-    fair_queue_entry fqent;
+struct request final : public fair_queue_entry {
     std::function<void(request& req)> handle;
     unsigned index;
 
     template <typename Func>
     request(fair_queue_entry::capacity_t cap, unsigned index, Func&& h)
-        : fqent(cap)
+        : fair_queue_entry(cap)
         , handle(std::move(h))
         , index(index)
     {}
 
-    void submit() {
+    virtual throttle::grab_result can_dispatch() const noexcept override {
+        return throttle::grab_result::grabbed;
+    }
+
+    virtual void dispatch() noexcept override {
         handle(*this);
         delete this;
     }
 };
 
 class test_env {
-    fair_group _fg;
     fair_queue _fq;
     std::vector<int> _results;
     std::vector<std::vector<std::exception_ptr>> _exceptions;
     fair_queue::class_id _nr_classes = 0;
     std::vector<request> _inflight;
-
-    static fair_group::config fg_config(unsigned cap) {
-        fair_group::config cfg;
-        cfg.rate_limit_duration = std::chrono::microseconds(cap);
-        return cfg;
-    }
 
     static fair_queue::config fq_config() {
         fair_queue::config cfg;
@@ -75,12 +71,13 @@ class test_env {
     }
 
     void drain() {
-        do {} while (tick() != 0);
+        while (tick()) {
+            continue;
+        }
     }
 public:
     test_env(unsigned capacity)
-        : _fg(fg_config(capacity), 1)
-        , _fq(_fg, fq_config())
+        : _fq(fq_config())
     {}
 
     // As long as there is a request sitting in the queue, tick() will process
@@ -90,27 +87,23 @@ public:
     // Because of this property, one useful use of tick() is to implement a drain()
     // method (see above) in which all requests currently sent to the queue are drained
     // before the queue is destroyed.
-    unsigned tick(unsigned n = 1) {
+    unsigned tick(unsigned n = 0) {
         unsigned processed = 0;
-        _fg.replenish_capacity(_fg.replenished_ts() + std::chrono::microseconds(1));
-        _fq.dispatch_requests([] (fair_queue_entry& ent) {
-            boost::intrusive::get_parent_from_member(&ent, &request::fqent)->submit();
-        });
+        while (true) {
+            _fq.dispatch_requests();
 
-        for (unsigned i = 0; i < n; ++i) {
             std::vector<request> curr;
             curr.swap(_inflight);
 
             for (auto& req : curr) {
+                if (processed < n) {
+                    _results[req.index]++;
+                }
                 processed++;
-                _results[req.index]++;
-                _fq.notify_request_finished(req.fqent.capacity());
             }
-
-            _fg.replenish_capacity(_fg.replenished_ts() + std::chrono::microseconds(1));
-            _fq.dispatch_requests([] (fair_queue_entry& ent) {
-                boost::intrusive::get_parent_from_member(&ent, &request::fqent)->submit();
-            });
+            if (processed >= n) {
+                break;
+            }
         }
         return processed;
     }
@@ -131,18 +124,16 @@ public:
 
     void do_op(fair_queue::class_id id, unsigned weight) {
         unsigned index = id;
-        auto cap = _fq.tokens_capacity(double(weight) / 1'000'000);
-        auto req = std::make_unique<request>(cap, index, [this, index] (request& req) mutable noexcept {
+        auto req = std::make_unique<request>(weight * 1000, index, [this, index] (request& req) mutable noexcept {
             try {
                 _inflight.push_back(std::move(req));
             } catch (...) {
                 auto eptr = std::current_exception();
                 _exceptions[index].push_back(eptr);
-                _fq.notify_request_finished(req.fqent.capacity());
             }
         });
 
-        _fq.queue(id, req->fqent);
+        _fq.queue(id, *req);
         req.release();
     }
 

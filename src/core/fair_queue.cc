@@ -96,41 +96,6 @@ fair_queue_ticket wrapping_difference(const fair_queue_ticket& a, const fair_que
             std::max<int32_t>(a._size - b._size, 0));
 }
 
-fair_group::fair_group(config cfg, unsigned nr_queues)
-        : _token_bucket(fixed_point_factor,
-                        std::max<capacity_t>(fixed_point_factor * token_bucket_t::rate_cast(cfg.rate_limit_duration).count(), tokens_capacity(cfg.limit_min_tokens)),
-                        tokens_capacity(cfg.min_tokens)
-                       )
-        , _per_tick_threshold(_token_bucket.limit() / nr_queues)
-{
-    if (tokens_capacity(cfg.min_tokens) > _token_bucket.threshold()) {
-        throw std::runtime_error("Fair-group replenisher limit is lower than threshold");
-    }
-}
-
-auto fair_group::grab_capacity(capacity_t cap) noexcept -> capacity_t {
-    assert(cap <= _token_bucket.limit());
-    return _token_bucket.grab(cap);
-}
-
-void fair_group::replenish_capacity(clock_type::time_point now) noexcept {
-    _token_bucket.replenish(now);
-}
-
-void fair_group::maybe_replenish_capacity(clock_type::time_point& local_ts) noexcept {
-    auto now = clock_type::now();
-    auto extra = _token_bucket.accumulated_in(now - local_ts);
-
-    if (extra >= _token_bucket.threshold()) {
-        local_ts = now;
-        replenish_capacity(now);
-    }
-}
-
-auto fair_group::capacity_deficiency(capacity_t from) const noexcept -> capacity_t {
-    return _token_bucket.deficiency(from);
-}
-
 // Priority class, to be used with a given fair_queue
 class fair_queue::priority_class_data {
     friend class fair_queue;
@@ -155,10 +120,8 @@ bool fair_queue::class_compare::operator() (const priority_class_ptr& lhs, const
     return lhs->_accumulated > rhs->_accumulated;
 }
 
-fair_queue::fair_queue(fair_group& group, config cfg)
+fair_queue::fair_queue(config cfg)
     : _config(std::move(cfg))
-    , _group(group)
-    , _group_replenish(clock_type::now())
 {
 }
 
@@ -181,7 +144,7 @@ void fair_queue::push_priority_class_from_idle(priority_class_data& pc) noexcept
         // duration. For this estimate how many capacity units can be
         // accumulated with the current class shares per rate resulution
         // and scale it up to tau.
-        capacity_t max_deviation = fair_group::fixed_point_factor / pc._shares * fair_group::token_bucket_t::rate_cast(_config.tau).count();
+        capacity_t max_deviation = shared_throttle::fixed_point_factor / pc._shares * shared_throttle::token_bucket_t::rate_cast(_config.tau).count();
         // On start this deviation can go to negative values, so not to
         // introduce extra if's for that short corner case, use signed
         // arithmetics and make sure the _accumulated value doesn't grow
@@ -219,37 +182,6 @@ void fair_queue::unplug_priority_class(priority_class_data& pc) noexcept {
 
 void fair_queue::unplug_class(class_id cid) noexcept {
     unplug_priority_class(*_priority_classes[cid]);
-}
-
-auto fair_queue::grab_pending_capacity(const fair_queue_entry& ent) noexcept -> grab_result {
-    _group.maybe_replenish_capacity(_group_replenish);
-
-    if (_group.capacity_deficiency(_pending->head)) {
-        return grab_result::pending;
-    }
-
-    capacity_t cap = ent._capacity;
-    if (cap > _pending->cap) {
-        return grab_result::cant_preempt;
-    }
-
-    _pending.reset();
-    return grab_result::grabbed;
-}
-
-auto fair_queue::grab_capacity(const fair_queue_entry& ent) noexcept -> grab_result {
-    if (_pending) {
-        return grab_pending_capacity(ent);
-    }
-
-    capacity_t cap = ent._capacity;
-    capacity_t want_head = _group.grab_capacity(cap);
-    if (_group.capacity_deficiency(want_head)) {
-        _pending.emplace(want_head, cap);
-        return grab_result::pending;
-    }
-
-    return grab_result::grabbed;
 }
 
 void fair_queue::register_priority_class(class_id id, uint32_t shares) {
@@ -297,38 +229,11 @@ void fair_queue::queue(class_id id, fair_queue_entry& ent) noexcept {
     pc._queue.push_back(ent);
 }
 
-void fair_queue::notify_request_finished(fair_queue_entry::capacity_t cap) noexcept {
-}
-
-void fair_queue::notify_request_cancelled(fair_queue_entry& ent) noexcept {
-    ent._capacity = 0;
-}
-
-fair_queue::clock_type::time_point fair_queue::next_pending_aio() const noexcept {
-    if (_pending) {
-        /*
-         * We expect the disk to release the ticket within some time,
-         * but it's ... OK if it doesn't -- the pending wait still
-         * needs the head rover value to be ahead of the needed value.
-         *
-         * It may happen that the capacity gets released before we think
-         * it will, in this case we will wait for the full value again,
-         * which's sub-optimal. The expectation is that we think disk
-         * works faster, than it really does.
-         */
-        auto over = _group.capacity_deficiency(_pending->head);
-        auto ticks = _group.capacity_duration(over);
-        return std::chrono::steady_clock::now() + std::chrono::duration_cast<std::chrono::microseconds>(ticks);
-    }
-
-    return std::chrono::steady_clock::time_point::max();
-}
-
-void fair_queue::dispatch_requests(std::function<void(fair_queue_entry&)> cb) {
+void fair_queue::dispatch_requests() {
     capacity_t dispatched = 0;
     boost::container::small_vector<priority_class_ptr, 2> preempt;
 
-    while (!_handles.empty() && (dispatched < _group.per_tick_grab_threshold())) {
+    while (!_handles.empty()) {
         priority_class_data& h = *_handles.top();
         if (h._queue.empty() || !h._plugged) {
             pop_priority_class(h);
@@ -336,12 +241,12 @@ void fair_queue::dispatch_requests(std::function<void(fair_queue_entry&)> cb) {
         }
 
         auto& req = h._queue.front();
-        auto gr = grab_capacity(req);
-        if (gr == grab_result::pending) {
+        auto gr = req.can_dispatch();
+        if (gr == throttle::grab_result::pending) {
             break;
         }
 
-        if (gr == grab_result::cant_preempt) {
+        if (gr == throttle::grab_result::cant_preempt) {
             pop_priority_class(h);
             preempt.emplace_back(&h);
             continue;
@@ -374,7 +279,7 @@ void fair_queue::dispatch_requests(std::function<void(fair_queue_entry&)> cb) {
         h._pure_accumulated += req_cap;
         dispatched += req_cap;
 
-        cb(req);
+        req.dispatch();
 
         if (h._plugged && !h._queue.empty()) {
             push_priority_class(h);
@@ -391,10 +296,10 @@ std::vector<seastar::metrics::impl::metric_definition_impl> fair_queue::metrics(
     priority_class_data& pc = *_priority_classes[c];
     return std::vector<sm::impl::metric_definition_impl>({
             sm::make_counter("consumption",
-                    [&pc] { return fair_group::capacity_tokens(pc._pure_accumulated); },
+                    [&pc] { return shared_throttle::capacity_tokens(pc._pure_accumulated); },
                     sm::description("Accumulated disk capacity units consumed by this class; an increment per-second rate indicates full utilization")),
             sm::make_counter("adjusted_consumption",
-                    [&pc] { return fair_group::capacity_tokens(pc._accumulated); },
+                    [&pc] { return shared_throttle::capacity_tokens(pc._accumulated); },
                     sm::description("Consumed disk capacity units adjusted for class shares and idling preemption")),
     });
 }
