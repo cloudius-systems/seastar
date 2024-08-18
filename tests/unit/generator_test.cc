@@ -26,6 +26,7 @@
 #include <seastar/testing/test_case.hh>
 #include <seastar/util/bool_class.hh>
 #include <seastar/util/later.hh>
+#include <string>
 #include <string_view>
 #if __cplusplus >= 202302L && defined(__cpp_lib_generator)
 #include <generator>
@@ -233,4 +234,151 @@ SEASTAR_TEST_CASE(test_generator_throws_from_consumer) {
     BOOST_REQUIRE(f.failed());
     BOOST_REQUIRE_THROW(std::rethrow_exception(f.get_exception()), std::invalid_argument);
     BOOST_REQUIRE_EQUAL(total, 0);
+}
+
+SEASTAR_TEST_CASE(test_batch_generator_empty_sequence) {
+    using int_gen = coroutine::experimental::generator<int, int, std::vector<int>>;
+    auto seq = std::invoke([]() -> int_gen {
+        co_return;
+    });
+    for (auto i = co_await seq.begin(); i != seq.end(); co_await ++i) {
+        BOOST_FAIL("found element in an empty sequence");
+    }
+}
+
+coroutine::experimental::generator<int, int, std::vector<int>>
+async_fibonacci_sequence_batch(unsigned count, unsigned batch_size, do_suspend suspend) {
+    auto a = 0, b = 1;
+    std::vector<int> batch;
+    for (unsigned i = 0; i < count; ++i) {
+        if (std::numeric_limits<decltype(a)>::max() - a < b) {
+            throw std::out_of_range(
+                fmt::format("fibonacci[{}] is greater than the largest value of int", i));
+        }
+        if (suspend) {
+            co_await yield();
+        }
+        int next = std::exchange(a, std::exchange(b, a + b));
+        batch.push_back(next);
+        if (batch.size() == batch_size) {
+            co_yield std::exchange(batch, {});
+        }
+    }
+    if (!batch.empty()) {
+        co_yield std::move(batch);
+    }
+}
+
+seastar::future<>
+verify_fib_drained(coroutine::experimental::generator<int, int, std::vector<int>> actual_fibs, unsigned count) {
+    auto expected_fibs = sync_fibonacci_sequence(count);
+    auto expected_fib = std::begin(expected_fibs);
+
+    auto actual_fib = co_await actual_fibs.begin();
+
+    for (; actual_fib != actual_fibs.end(); co_await ++actual_fib) {
+        BOOST_REQUIRE(expected_fib != std::end(expected_fibs));
+        BOOST_REQUIRE_EQUAL(*actual_fib, *expected_fib);
+        ++expected_fib;
+    }
+    BOOST_REQUIRE(actual_fib == actual_fibs.end());
+}
+
+SEASTAR_TEST_CASE(test_batch_generator_drained_with_suspend) {
+    constexpr unsigned count = 4;
+    constexpr unsigned batch_size = 2;
+    return verify_fib_drained(async_fibonacci_sequence_batch(count, batch_size, do_suspend::yes),
+                              count);
+}
+
+SEASTAR_TEST_CASE(test_batch_generator_drained_without_suspend) {
+    constexpr int count = 4;
+    constexpr int batch_size = 2;
+    return verify_fib_drained(async_fibonacci_sequence_batch(count, batch_size, do_suspend::no),
+                              count);
+}
+
+seastar::future<> test_batch_generator_not_drained(do_suspend suspend) {
+    auto fib = async_fibonacci_sequence_batch(42, 12, suspend);
+    auto actual_fib = co_await fib.begin();
+    BOOST_REQUIRE_EQUAL(*actual_fib, 0);
+}
+
+SEASTAR_TEST_CASE(test_batch_generator_not_drained_with_suspend) {
+    return test_batch_generator_not_drained(do_suspend::yes);
+}
+
+SEASTAR_TEST_CASE(test_batch_generator_not_drained_without_suspend) {
+    return test_batch_generator_not_drained(do_suspend::no);
+}
+
+SEASTAR_TEST_CASE(test_batch_generator_move_away) {
+    struct move_only {
+        int value;
+        move_only(int value)
+            : value{value}
+        {}
+        move_only(const move_only&) = delete;
+        move_only& operator=(const move_only&) = delete;
+        move_only(move_only&&) noexcept = default;
+        move_only& operator=(move_only&&) noexcept = default;
+    };
+
+    using batch_type = std::vector<move_only>;
+    using move_only_gen = coroutine::experimental::generator<move_only&&, move_only, batch_type>;
+
+    constexpr int count = 4;
+    constexpr unsigned batch_size = 2;
+    auto numbers = std::invoke([]() -> move_only_gen {
+        batch_type batch;
+        for (int i = 0; i < count; i++) {
+            batch.push_back(i);
+            if (batch.size() == batch_size) {
+                co_yield std::exchange(batch, {});
+            }
+        }
+        if (!batch.empty()) {
+            co_yield std::move(batch);
+        }
+    });
+
+    int expected_n = 0;
+    for (auto n = co_await numbers.begin(); n != numbers.end(); co_await ++n) {
+        BOOST_REQUIRE_EQUAL((*n).value, expected_n++);
+    }
+}
+
+SEASTAR_TEST_CASE(test_batch_generator_convertible) {
+    struct convertible {
+        const std::string value;
+        convertible(std::string&& value)
+            : value{std::move(value)}
+        {}
+        explicit operator int() const {
+            return std::stoi(value);
+        }
+    };
+
+    using batch_type = std::vector<convertible>;
+    using move_only_gen = coroutine::experimental::generator<int, convertible, batch_type>;
+
+    constexpr int count = 4;
+    constexpr unsigned batch_size = 2;
+    auto numbers = std::invoke([]() -> move_only_gen {
+        batch_type batch;
+        for (int i = 0; i < count; i++) {
+            batch.push_back(fmt::to_string(i));
+            if (batch.size() == batch_size) {
+                co_yield std::exchange(batch, {});
+            }
+        }
+        if (!batch.empty()) {
+            co_yield std::move(batch);
+        }
+    });
+
+    int expected_n = 0;
+    for (auto n = co_await numbers.begin(); n != numbers.end(); co_await ++n) {
+        BOOST_REQUIRE_EQUAL(*n, expected_n++);
+    }
 }
