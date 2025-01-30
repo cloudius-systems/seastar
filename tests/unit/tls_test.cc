@@ -1438,7 +1438,7 @@ SEASTAR_THREAD_TEST_CASE(test_alt_names) {
 SEASTAR_THREAD_TEST_CASE(test_peer_certificate_chain_handling) {
     tls::credentials_builder b;
 
-    b.set_x509_key_file(certfile("test_chain.crt"), certfile("test.key"), tls::x509_crt_format::PEM).get();
+    b.set_x509_key_file(certfile("test.crt"), certfile("test.key"), tls::x509_crt_format::PEM).get();
     b.set_x509_trust_file(certfile("catest.pem"), tls::x509_crt_format::PEM).get();
     b.set_client_auth(tls::client_auth::REQUIRE);
 
@@ -1488,17 +1488,10 @@ SEASTAR_THREAD_TEST_CASE(test_peer_certificate_chain_handling) {
             return contents;
         };
 
-        auto leaf_der = read_file(certfile("test.crt.der"));
-        auto root_der = read_file(certfile("catest.der"));
+        auto ders = {read_file(certfile("test.crt.der"))};
 
-        auto ensure_certificate_chain = [&leaf_der, &root_der](auto const& crts) {
-            BOOST_REQUIRE(crts.size() == 2);
-            BOOST_REQUIRE(crts[0] == leaf_der);
-            BOOST_REQUIRE(crts[1] == root_der);
-        };
-
-        ensure_certificate_chain(scrts);
-        ensure_certificate_chain(ccrts);
+        BOOST_REQUIRE(std::ranges::equal(scrts, ders));
+        BOOST_REQUIRE(std::ranges::equal(ccrts, ders));
     }
 }
 
