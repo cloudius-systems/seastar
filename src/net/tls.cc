@@ -1794,7 +1794,7 @@ public:
         return state_checked_access([this] {
             unsigned int list_size = 0;
             const gnutls_datum_t* client_cert_list = gnutls_certificate_get_peers(*this, &list_size);
-            auto res = std::vector<std::vector<uint8_t>>{};
+            auto res = std::vector<certificate_data>{};
             res.reserve(list_size);
             if (client_cert_list) {
                 for (auto const& client_cert : std::span{client_cert_list, list_size}) {
