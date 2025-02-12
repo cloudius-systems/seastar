@@ -601,7 +601,6 @@ void
 dns_resolver::impl::poll_sockets() {
     dns_log.trace("Poll sockets");
 
-    bool processed = false;
     for (;;) {
         // Retrieve the set of file descriptors that the library wants us to monitor.
         fd_set readers, writers;
@@ -628,21 +627,39 @@ dns_resolver::impl::poll_sockets() {
                           read_avail ? "r" : "",
                           write_avail ? "w" : "");
 
-            ares_socket_t read_fd = read_monitor && read_avail ? fd : ARES_SOCKET_BAD;
-            ares_socket_t write_fd = write_monitor && write_avail ? fd : ARES_SOCKET_BAD;
-            if (read_fd != ARES_SOCKET_BAD || write_fd != ARES_SOCKET_BAD) {
-                ares_process_fd(_channel, read_fd, write_fd);
+            // #2640: Recent c-ares will do processing
+            // of _all_ fds requiring close or similar
+            // when calling ares_process_fd. This can
+            // break our processing, if, say, we call
+            // release on the fd that is right now in 
+            // 'it' -> broken iterator pointing to
+            // garbage.
+            // Handle by instead calling ares_process_fds
+            // and disable all such background processing
+            // until we exit the loop.
+            ares_fd_events_t events[2] = {{0,}};
+            size_t nevents = 0;
+            if (read_monitor && read_avail) {
+                events[nevents].fd = fd;
+                events[nevents].events |= ARES_FD_EVENT_READ;
+                ++nevents;
+            }
+            if (write_monitor && write_avail) {
+                events[nevents].fd = fd;
+                events[nevents].events |= ARES_FD_EVENT_WRITE;
+                ++nevents;
+            }
+            if (nevents) {
+                ares_process_fds(_channel, events, nevents, ARES_PROCESS_FLAG_SKIP_NON_FD);
                 ++processed_fds;
             }
         }
         if (processed_fds == 0) {
           break;
         }
-        processed = true;
     }
-    if (!processed) {
-      ares_process_fd(_channel, ARES_SOCKET_BAD, ARES_SOCKET_BAD);
-    }
+    // process close etc
+    ares_process_fds(_channel, nullptr, 0, ARES_PROCESS_FLAG_NONE);
 }
 
 dns_resolver::srv_records
